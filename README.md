@@ -6,6 +6,8 @@ articles in the fields I'm learning about.
 The goal is to make it easy to find relevant research (e.g. from
 [arXiv](https://arxiv.org/)) and keep what I'm reading organized.
 
+![The Gymnasium university web app — the Papers feed](docs/screenshots/university.png)
+
 ## Ideas / Roadmap
 
 - [ ] Search and pull papers from arXiv by topic, author, or keyword
