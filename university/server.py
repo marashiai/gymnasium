@@ -233,10 +233,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._api_item(int(parts[2]))
                 if len(parts) == 4 and parts[3] == "document" and method == "GET":
                     return self._api_item_document(int(parts[2]))
+                if len(parts) == 4 and parts[3] == "document" and method == "POST":
+                    return self._api_item_document_post(int(parts[2]))
                 if len(parts) == 4 and parts[3] == "markdown" and method == "GET":
                     return self._api_item_markdown_get(int(parts[2]))
-                if len(parts) == 4 and parts[3] == "markdown" and method == "POST":
-                    return self._api_item_markdown_post(int(parts[2]))
             if len(parts) == 3 and parts[0] == "api" and parts[1] == "kb" and method == "GET":
                 return self._api_kb_get(int(parts[2]))
             if len(parts) == 3 and parts[0] == "api" and parts[1] == "kb" and method == "DELETE":
@@ -316,6 +316,7 @@ class Handler(BaseHTTPRequestHandler):
             "has_markdown": bool(row["markdown_path"]),
             "markdown_source": row["markdown_source"],
             "added_by_user": bool(row["added_by_user"]),
+            "doc_uploaded": bool(row["doc_uploaded"]),
             "tags": [t for t in tag_list if t][:3],
         }
         # Fields the cards / filters need (authors, company, publication, language).
@@ -533,10 +534,10 @@ class Handler(BaseHTTPRequestHandler):
             row = self.ctx.conn.execute(
                 "SELECT * FROM corpus_item WHERE id=?", (item_id,)).fetchone()
             out = self._item_dict(row)
-            # Cheap advertisement only: a user markdown exists, OR a real source
-            # document is on disk that could be converted on first read. No
-            # conversion runs here — that happens lazily in the markdown GET.
-            out["markdown_available"] = bool(row["markdown_path"]) or \
+            # Cheap advertisement only: a real source document is on disk that
+            # could be converted on first read. No conversion runs here — that
+            # happens lazily in the markdown GET.
+            out["markdown_available"] = \
                 docs.has_convertible_source(row, self.ctx.docs_dir) or \
                 docs.has_repo_readme(row, self.ctx.docs_dir)
         self._send_json(out)
@@ -615,7 +616,17 @@ class Handler(BaseHTTPRequestHandler):
         self._send_bytes(content.encode("utf-8"), "text/markdown; charset=utf-8",
                          headers={"X-Markdown-Source": source})
 
-    def _api_item_markdown_post(self, item_id: int):
+    def _api_item_document_post(self, item_id: int):
+        """Upload a supporting document (PDF or markdown/text) for an item.
+
+        A PDF becomes the item's authoritative ``source.pdf`` and the reader
+        auto-converts it to markdown on next open. Any other file
+        (``.md``/``.markdown``/``.html``/``.txt``) is stored as supplementary
+        material and the cached auto-conversion is dropped so the reader
+        regenerates a readable view from the new file. Marks the item
+        ``doc_uploaded=1`` so ``ensure_document`` never refetches/replaces the
+        user's file.
+        """
         with self.ctx.lock:
             row = self.ctx.conn.execute(
                 "SELECT * FROM corpus_item WHERE id=?", (item_id,)).fetchone()
@@ -624,28 +635,38 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
             return self._send_json({"error": "empty body"}, status=400)
-        if length > _MAX_MARKDOWN:
+        if length > _MAX_PDF:
             return self._send_json({"error": "too large"}, status=413)
         raw = self.rfile.read(length)
         ctype = (self.headers.get("Content-Type") or "").lower()
         if "multipart/form-data" in ctype:
-            data = _parse_multipart_file(raw, ctype)
-            if data is None:
+            parsed = _parse_multipart_form(raw, ctype)
+            data = parsed["file"]
+            if not data:
                 return self._send_json({"error": "no file field"}, status=400)
+            filename = parsed["filename"] or ""
         else:
             data = raw
-        try:
-            content = data.decode("utf-8")
-        except UnicodeDecodeError:
-            return self._send_json({"error": "invalid encoding"}, status=400)
-        rel = docs.save_markdown(row, content, self.ctx.docs_dir)
+            filename = ""
+        ext = os.path.splitext(filename or "")[1].lower()
+        is_pdf = ext == ".pdf" or "pdf" in ctype
+        if is_pdf:
+            data = data if _looks_like_pdf(data) else data
+        if not filename:
+            filename = "source.pdf" if is_pdf else "support.md"
+        now = utcnow()
         with self.ctx.lock:
-            # An upload always overrides any auto version (source=user).
+            doc_rel = docs.store_uploaded_source(row, data, filename, self.ctx.docs_dir)
+            # Drop any cached markdown so the reader regenerates from the new file.
+            row = self.ctx.conn.execute(
+                "SELECT * FROM corpus_item WHERE id=?", (item_id,)).fetchone()
+            docs.clear_markdown_files(row, self.ctx.docs_dir)
             self.ctx.conn.execute(
-                "UPDATE corpus_item SET markdown_path=?, markdown_source=? WHERE id=?",
-                (rel, "user", item_id))
+                "UPDATE corpus_item SET doc_path=?, doc_fetched_at=?, doc_uploaded=1, "
+                "markdown_path=NULL, markdown_source=NULL WHERE id=?",
+                (doc_rel, now, item_id))
             self.ctx.conn.commit()
-        self._send_json({"ok": True, "has_markdown": True})
+        self._send_json({"ok": True, "doc_path": doc_rel})
 
     # -- summarize ----------------------------------------------------------
     def _api_summarize(self):
@@ -1245,7 +1266,7 @@ class Handler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------------------
 import re as _re
 
-_MAX_MARKDOWN = 2 * 1024 * 1024  # 2 MB cap on attached markdown
+_MAX_MARKDOWN = 2 * 1024 * 1024  # 2 MB cap on a markdown/text attachment
 _MAX_PDF = 30 * 1024 * 1024  # 30 MB cap on an uploaded PDF
 
 
@@ -1308,6 +1329,11 @@ def _parse_multipart_file(raw: bytes, ctype: str) -> Optional[bytes]:
         if fallback is None:
             fallback = body
     return fallback
+
+
+def _looks_like_pdf(data: bytes) -> bool:
+    """True when the bytes start with a PDF header (%PDF-)."""
+    return data[:5] == b"%PDF-" if data else False
 
 
 def _github_repo(url: str) -> Optional[Tuple[str, str]]:

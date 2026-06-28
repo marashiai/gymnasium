@@ -681,13 +681,32 @@ def _http_raw(method, url, data=None, content_type=None, cookie=None):
         return e.code, None, None
 
 
+def _multipart_doc(data, filename, content_type=None):
+    """Build a multipart/form-data body with one binary file part."""
+    boundary = "----gymdocboundary"
+    parts = [
+        "--{}\r\n".format(boundary).encode(),
+        ('Content-Disposition: form-data; name="file"; '
+         'filename="{}"\r\n'.format(filename)).encode(),
+    ]
+    if content_type:
+        parts.append("Content-Type: {}\r\n\r\n".format(content_type).encode())
+    else:
+        parts.append(b"\r\n")
+    parts.append(data)
+    parts.append(b"\r\n")
+    parts.append("--{}--\r\n".format(boundary).encode())
+    return b"".join(parts), "multipart/form-data; boundary={}".format(boundary)
+
+
 def test_markdown_attach_and_fetch(live_server, monkeypatch):
     base = live_server
     # gated without a cookie
     status, _, _ = _http_raw("GET", base + "/api/item/1/markdown")
     assert status == 401
-    status, _, _ = _http_raw("POST", base + "/api/item/1/markdown",
-                             data=b"# x", content_type="text/markdown")
+    body, ctype = _multipart_doc(b"# x", "a.md", "text/markdown")
+    status, _, _ = _http_raw("POST", base + "/api/item/1/document",
+                             data=body, content_type=ctype)
     assert status == 401
 
     status, _, setck = _http("POST", base + "/api/login",
@@ -698,9 +717,9 @@ def test_markdown_attach_and_fetch(live_server, monkeypatch):
     repo_id = next(i["id"] for i in feed["items"] if i["kind"] == "repo")
     item_id = paper_ids[0]
 
-    # No user markdown and auto-conversion forced unavailable -> 404. Pinning the
-    # auto path keeps this assertion deterministic whether or not markitdown is
-    # installed in the environment (it would otherwise auto-convert and return 200).
+    # No uploaded source and auto-conversion forced unavailable -> 404. Pinning
+    # the auto path keeps this assertion deterministic whether or not markitdown
+    # is installed in the environment (it would otherwise auto-convert and 200).
     monkeypatch.setattr(docs, "auto_markdown", lambda *a, **k: None)
     status, item, _ = _http("GET", base + "/api/item/{}".format(item_id), cookie=cookie)
     assert status == 200 and item["has_markdown"] is False
@@ -708,37 +727,27 @@ def test_markdown_attach_and_fetch(live_server, monkeypatch):
                              cookie=cookie)
     assert status == 404
 
-    # Raw text/markdown upload: the uploaded user markdown is then fetched (200).
-    md = "# Heading\n\nHello **world**.".encode("utf-8")
-    status, _, _ = _http_raw("POST", base + "/api/item/{}/markdown".format(item_id),
-                             data=md, content_type="text/markdown", cookie=cookie)
+    # A supporting markdown upload is stored as the source document; the cached
+    # auto conversion is dropped so the reader regenerates from the new file.
+    md = b"# Heading\n\nHello **world**."
+    body, ctype = _multipart_doc(md, "note.md", "text/markdown")
+    status, _, _ = _http_raw("POST", base + "/api/item/{}/document".format(item_id),
+                             data=body, content_type=ctype, cookie=cookie)
     assert status == 200
     status, item, _ = _http("GET", base + "/api/item/{}".format(item_id), cookie=cookie)
-    assert item["has_markdown"] is True
-    status, body, ctype = _http_raw(
+    assert item["doc_uploaded"] is True
+    assert os.path.basename(item["doc_path"]) == "note.md"
+    # The markdown GET converts the uploaded note via markitdown (stubbed).
+    monkeypatch.setattr(
+        docs, "auto_markdown",
+        lambda item, docs_dir, conn, _md=md: _md.decode("utf-8"))
+    status, body, mctype = _http_raw(
         "GET", base + "/api/item/{}/markdown".format(item_id), cookie=cookie)
-    assert status == 200 and body.decode("utf-8") == "# Heading\n\nHello **world**."
-    assert "text/markdown" in ctype
+    assert status == 200 and body.decode("utf-8") == md.decode("utf-8")
+    assert "text/markdown" in mctype
 
-    # Minimal multipart/form-data upload on a second item.
-    boundary = "----gymtestboundary"
-    multipart = (
-        "--{b}\r\n"
-        'Content-Disposition: form-data; name="file"; filename="a.md"\r\n'
-        "Content-Type: text/markdown\r\n\r\n"
-        "## Multipart\r\n"
-        "--{b}--\r\n"
-    ).format(b=boundary).encode("utf-8")
-    status, _, _ = _http_raw(
-        "POST", base + "/api/item/{}/markdown".format(repo_id), data=multipart,
-        content_type="multipart/form-data; boundary={}".format(boundary), cookie=cookie)
-    assert status == 200
-    status, body, _ = _http_raw(
-        "GET", base + "/api/item/{}/markdown".format(repo_id), cookie=cookie)
-    assert status == 200 and body.decode("utf-8") == "## Multipart"
-
-    # When auto-conversion IS available, an item with no user markdown serves the
-    # converted text and reports markdown_source=auto.
+    # When auto-conversion IS available and NO upload exists, the converted text
+    # is served and reports markdown_source=auto.
     auto_id = paper_ids[1]
     monkeypatch.setattr(docs, "auto_markdown", lambda *a, **k: "# Auto\n\nConverted body.")
     status, body, _ = _http_raw(
@@ -746,6 +755,51 @@ def test_markdown_attach_and_fetch(live_server, monkeypatch):
     assert status == 200 and body.decode("utf-8") == "# Auto\n\nConverted body."
     status, item, _ = _http("GET", base + "/api/item/{}".format(auto_id), cookie=cookie)
     assert item["markdown_source"] == "auto"
+
+
+def test_upload_supporting_pdf_replaces_source_and_regenerates(
+        live_server, tmp_path, monkeypatch):
+    base = live_server
+    _install_fake_markitdown(monkeypatch, text="# From uploaded PDF\n\nConverted.")
+    status, _, setck = _http("POST", base + "/api/login",
+                             {"username": "maya", "password": "pw123"})
+    cookie = setck.split(";")[0]
+    status, feed, _ = _http("GET", base + "/api/feed", cookie=cookie)
+    paper = next(i for i in feed["items"] if i["kind"] == "paper")
+    pid = paper["id"]
+
+    # Upload a supporting PDF for the tracker paper.
+    pdf = b"%PDF-1.4\nfake supporting pdf\n%%EOF\n"
+    body, ctype = _multipart_doc(pdf, "supplement.pdf", "application/pdf")
+    status, raw, _ = _http_raw("POST", base + "/api/item/{}/document".format(pid),
+                               data=body, content_type=ctype, cookie=cookie)
+    out = json.loads(raw.decode())
+    assert status == 200 and out["ok"] is True
+    assert out["doc_path"].endswith("source.pdf")
+
+    # The item is flagged doc_uploaded and its doc_path now points at the upload.
+    status, item, _ = _http("GET", base + "/api/item/{}".format(pid), cookie=cookie)
+    assert item["doc_uploaded"] is True
+    assert os.path.basename(item["doc_path"]) == "source.pdf"
+
+    # The stored file is the uploaded bytes (authoritative — never refetched).
+    c = db.connect(str(tmp_path / "g.db"))
+    row = c.execute("SELECT doc_path FROM corpus_item WHERE id=?", (pid,)).fetchone()
+    c.close()
+    pdf_path = tmp_path / "documents" / row["doc_path"]
+    assert pdf_path.read_bytes() == pdf
+
+    # The markdown GET auto-converts the uploaded PDF (stubbed markitdown).
+    status, md, _ = _http_raw(
+        "GET", base + "/api/item/{}/markdown".format(pid), cookie=cookie)
+    assert status == 200 and md.decode("utf-8") == "# From uploaded PDF\n\nConverted."
+
+    # Reopening the item never refetches/replaces the uploaded doc: the stored
+    # bytes are unchanged even when _fetch would return something different.
+    monkeypatch.setattr(docs, "_fetch", lambda url: b"OTHER")
+    status, item, _ = _http("GET", base + "/api/item/{}".format(pid), cookie=cookie)
+    assert os.path.basename(item["doc_path"]) == "source.pdf"
+    assert pdf_path.read_bytes() == pdf  # upload is authoritative
 
 
 def test_markdown_auto_then_user_override(live_server, monkeypatch):
@@ -765,6 +819,7 @@ def test_markdown_auto_then_user_override(live_server, monkeypatch):
     assert item["has_markdown"] is False
     assert item["markdown_available"] is True
     assert item["markdown_source"] is None
+    assert item["doc_uploaded"] is False
 
     # First markdown GET triggers the lazy auto conversion and caches it.
     status, body, _ = _http_raw(
@@ -773,16 +828,20 @@ def test_markdown_auto_then_user_override(live_server, monkeypatch):
     status, item, _ = _http("GET", base + "/api/item/{}".format(pid), cookie=cookie)
     assert item["markdown_source"] == "auto"
 
-    # A user upload overrides the auto version and is preferred thereafter.
-    status, _, _ = _http_raw("POST", base + "/api/item/{}/markdown".format(pid),
-                             data=b"# Mine\n\nUploaded.", content_type="text/markdown",
-                             cookie=cookie)
+    # A supporting PDF upload becomes the new authoritative source; the cached
+    # auto conversion is dropped so the reader regenerates from the upload.
+    _install_fake_markitdown(monkeypatch, text="# Mine\n\nUploaded.")
+    pdf = b"%PDF-1.4\nupload\n%%EOF\n"
+    body, ctype = _multipart_doc(pdf, "mine.pdf", "application/pdf")
+    status, _, _ = _http_raw("POST", base + "/api/item/{}/document".format(pid),
+                             data=body, content_type=ctype, cookie=cookie)
     assert status == 200
     status, item, _ = _http("GET", base + "/api/item/{}".format(pid), cookie=cookie)
-    assert item["has_markdown"] is True and item["markdown_source"] == "user"
-    status, body, _ = _http_raw(
+    assert item["doc_uploaded"] is True
+    assert os.path.basename(item["doc_path"]) == "source.pdf"
+    status, md, _ = _http_raw(
         "GET", base + "/api/item/{}/markdown".format(pid), cookie=cookie)
-    assert body.decode("utf-8") == "# Mine\n\nUploaded."  # user wins over auto
+    assert md.decode("utf-8") == "# Mine\n\nUploaded."  # regenerated from upload
 
     # A repo serves its stored README.md as markdown (already markdown, no
     # markitdown conversion). The fake fetch returns README bytes on ingest.

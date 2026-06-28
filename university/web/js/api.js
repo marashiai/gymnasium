@@ -74,14 +74,20 @@
         return r.text().then(function (text) { return { text: text, source: source }; });
       });
     },
-    uploadMarkdown: function (id, file) {
-      return fetch('/api/item/' + id + '/markdown', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'text/markdown' }, body: file
+    uploadDocument: function (id, file) {
+      // Multipart upload of a supporting document (PDF or markdown/text) that
+      // becomes the item's source. The browser sets the multipart Content-Type
+      // from the FormData body, so we must NOT set it ourselves.
+      var fd = new FormData();
+      fd.append('file', file, file.name);
+      return fetch('/api/item/' + id + '/document', {
+        method: 'POST', credentials: 'same-origin', body: fd
       }).then(function (r) {
         if (r.status === 401) { onUnauthorized(); throw new Error('unauthorized'); }
-        if (!r.ok) throw new Error('upload failed');
-        return r.json();
+        return r.json().then(function (data) {
+          if (!r.ok) { throw Object.assign(new Error(data.error || 'upload failed'), { data: data }); }
+          return data;
+        });
       });
     },
     summarize: function (itemId, model) { return request('POST', '/api/summarize', { item_id: itemId, model: model }); },

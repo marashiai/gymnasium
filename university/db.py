@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS corpus_item (
     markdown_path   TEXT,
     markdown_source TEXT,                     -- 'user' | 'auto'
     added_by_user   INTEGER DEFAULT 0,        -- 1 = added by the user via a link
+    doc_uploaded    INTEGER DEFAULT 0,        -- 1 = source doc was user-uploaded
     raw_json        TEXT,
     UNIQUE (kind, external_id)
 );
@@ -234,6 +235,7 @@ def bootstrap(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "corpus_item", "markdown_path", "TEXT")
     _ensure_column(conn, "corpus_item", "markdown_source", "TEXT")
     _ensure_column(conn, "corpus_item", "added_by_user", "INTEGER DEFAULT 0")
+    _ensure_column(conn, "corpus_item", "doc_uploaded", "INTEGER DEFAULT 0")
     # Backfill the back-reference table from each entry's originating item_id so
     # existing concepts already list their origin article. Idempotent: the
     # UNIQUE constraint + INSERT OR IGNORE means re-running adds nothing.

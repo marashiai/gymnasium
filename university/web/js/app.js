@@ -424,10 +424,10 @@
     var origLink = it.url
       ? '<a href="' + esc(it.url) + '" target="_blank" rel="noopener noreferrer" style="font:600 13px/1.3 var(--font-sans);color:var(--fg-link);margin-left:10px">' + ico(ICON.external, 'style="width:14px;height:14px;vertical-align:-2px;margin-right:3px"') + 'Open original</a>'
       : '';
-    var attachLabel = it.has_markdown ? 'Replace markdown' : 'Attach markdown';
+    var attachLabel = it.doc_uploaded ? 'Replace supporting PDF' : 'Upload supporting PDF';
     var attachControl = '<div style="margin-top:10px">' +
       '<button class="gym-press" id="mdAttachBtn" style="display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--border-hair);background:var(--bg-surface);border-radius:999px;cursor:pointer;font:700 12px/1 var(--font-sans);color:var(--fg-2)">' + ico(ICON.plus, 'style="width:15px;height:15px"') + attachLabel + '</button>' +
-      '<input type="file" id="mdFile" accept=".md,.markdown,text/markdown" hidden>' +
+      '<input type="file" id="mdFile" accept="application/pdf,.pdf" hidden>' +
       '</div>';
 
     // A real <article> with a single <h1> title and <p>/markdown body lets
@@ -903,12 +903,12 @@
       S.item = it;
       S.summaryTerms = it.summary_terms || [];
       if (it.summary_readable) { it._summary = it.summary_readable; }
-      // Try to load markdown when one exists OR an original could be converted.
-      // The first open may trigger a lazy auto-conversion server-side, so show
-      // a small loading state until it resolves (404 falls back to abstract).
-      if (it.has_markdown || it.markdown_available) { it._markdownLoading = true; }
+      // Try to load markdown when an original could be converted. The first
+      // open may trigger a lazy auto-conversion server-side, so show a small
+      // loading state until it resolves (404 falls back to abstract).
+      if (it.markdown_available) { it._markdownLoading = true; }
       render();
-      if (it.has_markdown || it.markdown_available) {
+      if (it.markdown_available) {
         API.markdown(id).then(function (md) {
           if (S.item && S.item.id === id) {
             S.item._markdownLoading = false;
@@ -937,21 +937,31 @@
     }).catch(function (e) { toast('Could not open item'); });
   }
 
-  function attachMarkdown(file) {
+  function uploadSupportingDoc(file) {
     if (!file || !S.item) return;
     var id = S.item.id;
-    API.uploadMarkdown(id, file).then(function () {
-      toast('Markdown attached');
-      return API.markdown(id);
+    toast('Uploading supporting PDF…');
+    API.uploadDocument(id, file).then(function () {
+      toast('Supporting PDF attached');
+      // Reload the item so doc_uploaded/markdown_available reflect the new file,
+      // then re-fetch the readable markdown (the server drops the cached auto
+      // conversion so this regenerates from the new source).
+      return API.item(id);
+    }).then(function (it) {
+      if (S.item && S.item.id === id) {
+        S.item = it;
+        S.item._markdownLoading = true;
+        render();
+        return API.markdown(id);
+      }
     }).then(function (md) {
       if (S.item && S.item.id === id && md != null) {
-        S.item.has_markdown = true;
         S.item._markdownLoading = false;
         S.item._markdownHTML = renderMarkdownHTML(md.text);
-        S.item._markdownSource = md.source;  // 'user' — upload overrides auto.
+        S.item._markdownSource = md.source;
         render();
       }
-    }).catch(function () { toast('Could not attach markdown'); });
+    }).catch(function () { toast('Could not attach supporting PDF'); });
   }
 
   // -- selection toolbar --
@@ -1432,7 +1442,7 @@
     });
     $('screen').addEventListener('change', function (e) {
       if (e.target.id === 'mdFile' && e.target.files && e.target.files[0]) {
-        attachMarkdown(e.target.files[0]);
+        uploadSupportingDoc(e.target.files[0]);
         e.target.value = '';
       }
       if (e.target.id === 'addPdf' && e.target.files && e.target.files[0]) {

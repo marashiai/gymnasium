@@ -19,7 +19,7 @@ import sqlite3
 import urllib.request
 import urllib.error
 from urllib.parse import urljoin
-from typing import Optional
+from typing import List, Optional
 
 from .db import utcnow
 
@@ -327,6 +327,69 @@ def store_uploaded_pdf(item: sqlite3.Row, data: bytes, docs_dir: str) -> str:
     return os.path.join(rel_dir, "source.pdf")
 
 
+def store_uploaded_source(item: sqlite3.Row, data: bytes, filename: str,
+                          docs_dir: str) -> str:
+    """Store a user-uploaded supporting document and return its repo-relative path.
+
+    A PDF becomes ``source.pdf`` and is treated as the authoritative source
+    document (the reader auto-converts it to markdown on next open). Any other
+    file (``.md``/``.markdown``/``.html``/``.txt``) is stored with a safe
+    filename and is NOT marked as the source document — it is supplementary
+    material listed alongside the original. Overwrites a prior upload with the
+    same target filename (idempotent).
+    """
+    try:
+        raw = json.loads(item["raw_json"]) if item["raw_json"] else {}
+    except (ValueError, TypeError):
+        raw = {}
+    if item["kind"] == "repo":
+        rel_dir = os.path.join("repos", _repo_dir_slug(item, raw))
+    else:
+        rel_dir = os.path.join("papers", _paper_dir_slug(item, raw))
+    abs_dir = os.path.join(docs_dir, rel_dir)
+    os.makedirs(abs_dir, exist_ok=True)
+
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext == ".pdf":
+        target = "source.pdf"
+    else:
+        safe_name = _safe_slug(os.path.basename(filename or "support"), "support")
+        # _safe_slug strips a leading extension dot; re-attach the original ext
+        # so a .md/.html/.txt upload keeps a recognizable suffix.
+        if ext and not safe_name.endswith(ext):
+            safe_name = safe_name + ext
+        target = safe_name or "support"
+    with open(os.path.join(abs_dir, target), "wb") as fh:
+        fh.write(data)
+    return os.path.join(rel_dir, target)
+
+
+def clear_markdown_files(item: sqlite3.Row, docs_dir: str) -> None:
+    """Drop the cached auto-conversion AND any user markdown for an item.
+
+    Called after a new source document is uploaded so the reader regenerates
+    the readable view from the new file instead of showing a stale cached one.
+    Best-effort and non-fatal.
+    """
+    try:
+        raw = json.loads(item["raw_json"]) if item["raw_json"] else {}
+    except (ValueError, TypeError):
+        raw = {}
+    if item["kind"] == "repo":
+        rel_dir = os.path.join("repos", _repo_dir_slug(item, raw))
+    else:
+        rel_dir = os.path.join("papers", _paper_dir_slug(item, raw))
+    abs_dir = os.path.join(docs_dir, rel_dir)
+    for name in ("article.auto.md", "article.md"):
+        path = os.path.join(abs_dir, name)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError as exc:
+            print("[docs] clear markdown failed for item {}: {}".format(
+                item["id"], exc))
+
+
 def save_markdown(item: sqlite3.Row, content: str, docs_dir: str) -> str:
     """Write uploaded markdown as ``article.md`` in the item's doc folder.
 
@@ -365,9 +428,18 @@ def auto_markdown(item: sqlite3.Row, docs_dir: str, conn: sqlite3.Connection) ->
     doc_rel = ensure_document(item, docs_dir, conn)
     if not doc_rel:
         return None
-    # Only real source documents convert; the abstract.txt fallback is not one.
+    # The authoritative source document (source.pdf / source.html) converts
+    # directly. For a PAPER, a user-uploaded .md/.html/.txt supporting file
+    # converts too (markitdown passes markdown/text through essentially
+    # unchanged). A repo's README.md is served by the repo README path and is
+    # not an auto-conversion candidate; the abstract.txt fallback isn't either.
     base = os.path.basename(doc_rel)
-    if base not in ("source.pdf", "source.html"):
+    convertible_extra = None
+    if base not in ("source.pdf", "source.html") and item["kind"] != "repo":
+        ext = os.path.splitext(base)[1].lower()
+        if ext in (".md", ".markdown", ".html", ".htm", ".txt"):
+            convertible_extra = base
+    if base not in ("source.pdf", "source.html") and convertible_extra is None:
         return None
     abs_src = os.path.join(docs_dir, doc_rel)
     if not os.path.isfile(abs_src):
@@ -434,6 +506,42 @@ def read_repo_readme(item: sqlite3.Row, docs_dir: str) -> Optional[str]:
         return fh.read()
 
 
+def _convertible_doc_names(item: sqlite3.Row, docs_dir: str) -> List[str]:
+    """Basenames of on-disk documents that markitdown can convert for an item.
+
+    The authoritative source document (``source.pdf`` / ``source.html``) is
+    preferred; for a PAPER a user-uploaded ``.md``/``.markdown``/``.html``/
+    ``.txt`` supporting file is also convertible (markitdown passes plain text
+    and markdown through essentially unchanged). A repo's ``README.md`` is
+    excluded — it is already markdown and is served directly by the repo
+    README path, not via auto-conversion.
+    """
+    try:
+        raw = json.loads(item["raw_json"]) if item["raw_json"] else {}
+    except (ValueError, TypeError):
+        raw = {}
+    if item["kind"] == "repo":
+        rel_dir = os.path.join("repos", _repo_dir_slug(item, raw))
+    else:
+        rel_dir = os.path.join("papers", _paper_dir_slug(item, raw))
+    abs_dir = os.path.join(docs_dir, rel_dir)
+    if not os.path.isdir(abs_dir):
+        return []
+    preferred = ("source.pdf", "source.html")
+    out = []
+    for name in preferred:
+        if os.path.isfile(os.path.join(abs_dir, name)):
+            out.append(name)
+    if item["kind"] != "repo":
+        for name in sorted(os.listdir(abs_dir)):
+            if name in out or name == "README.md":
+                continue
+            ext = os.path.splitext(name)[1].lower()
+            if ext in (".md", ".markdown", ".html", ".htm", ".txt"):
+                out.append(name)
+    return out
+
+
 def has_convertible_source(item: sqlite3.Row, docs_dir: str) -> bool:
     """Cheap check: is a real source doc already on disk that could convert?
 
@@ -441,11 +549,18 @@ def has_convertible_source(item: sqlite3.Row, docs_dir: str) -> bool:
     the item endpoint to advertise a ``markdown_available`` flag without work.
     """
     doc_rel = item["doc_path"]
-    if not doc_rel:
-        return False
-    if os.path.basename(doc_rel) not in ("source.pdf", "source.html"):
-        return False
-    return os.path.isfile(os.path.join(docs_dir, doc_rel))
+    if doc_rel:
+        base = os.path.basename(doc_rel)
+        if base in ("source.pdf", "source.html"):
+            return os.path.isfile(os.path.join(docs_dir, doc_rel))
+        # A user-uploaded markdown/text/html supporting file (papers only).
+        if item["kind"] != "repo" and base != "README.md":
+            ext = os.path.splitext(base)[1].lower()
+            if ext in (".md", ".markdown", ".html", ".htm", ".txt"):
+                return os.path.isfile(os.path.join(docs_dir, doc_rel))
+    # A supporting upload may live alongside the source even when doc_path
+    # still points at a fetched original (papers only).
+    return bool(_convertible_doc_names(item, docs_dir))
 
 
 def ensure_document(item: sqlite3.Row, docs_dir: str, conn: sqlite3.Connection) -> Optional[str]:
@@ -462,10 +577,14 @@ def ensure_document(item: sqlite3.Row, docs_dir: str, conn: sqlite3.Connection) 
         raw = {}
 
     if have_existing:
-        # Idempotent, except two arXiv upgrades, where we fall through and
-        # re-store: an abstract-only item that can now reach the real PDF, and a
+        # Idempotent, except for two self-healing upgrades of a DOWNLOADED doc:
+        # an abstract-only item that can now reach the real PDF, and a
         # PDF-derived item that can be replaced by the clean full-text HTML
         # (which drops the watermark/spacing damage that breaks rendering).
+        # A doc the USER uploaded (doc_uploaded=1) is authoritative — we never
+        # refetch or replace it.
+        if item["doc_uploaded"] if "doc_uploaded" in item.keys() else False:
+            return existing
         basename = os.path.basename(existing)
         upgradable = item["kind"] != "repo" and (
             (basename == "abstract.txt" and _arxiv_pdf_url(item, raw) is not None)
