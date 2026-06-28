@@ -57,9 +57,12 @@ if [ -n "${TUNNEL_NAME:-}" ] && [ -n "${APP_HOST:-}" ]; then
   TUNNEL_MODE=1
 fi
 
-# Prefer the installed console script; fall back to running the package
-# module directly so the script works from a source checkout too.
-if command -v gymnasium >/dev/null 2>&1; then
+# Prefer the project venv (which has markitdown for PDF→markdown conversion),
+# then an installed console script on PATH, else fall back to running the
+# package module directly so the script works from a source checkout too.
+if [ -x "${ROOT}/.venv/bin/gymnasium" ]; then
+  APP_CMD=("${ROOT}/.venv/bin/gymnasium")
+elif command -v gymnasium >/dev/null 2>&1; then
   APP_CMD=(gymnasium)
 else
   APP_CMD=(python3 -m university.server)
