@@ -1,11 +1,14 @@
 # Hosting Gymnasium with Docker and Cloudflare Tunnel
 
-Gymnasium runs as a two-container Compose application:
+Gymnasium runs as a three-service Compose application:
 
-- `app` contains Python, the Gymnasium package, document conversion
-  dependencies, and the OpenCode CLI.
+- `app` serves the UI/API, stores the SQLite FTS5 and sqlite-vec index, creates
+  local embeddings, and exposes a read-only MCP endpoint on the private network.
+- `opencode` keeps the OpenCode server and its MCP connection warm. The app uses
+  its synchronous HTTP API for generation, avoiding a new OpenCode/MCP startup
+  for every request.
 - `cloudflared` owns the named tunnel and routes the public hostname to the
-  app over the private Compose network.
+  app over the private Compose network. This service is optional.
 
 All mutable state remains on the host. Images contain no database, documents,
 reports, account credentials, or Cloudflare credentials.
@@ -22,7 +25,11 @@ reports, account credentials, or Cloudflare credentials.
 The application stores its own usernames and passwords in plaintext. Use a
 strong, unique password and consider putting Cloudflare Access in front of the
 site. The Compose app port is published only on `127.0.0.1`; public traffic
-reaches it through the tunnel sidecar.
+reaches it through the tunnel sidecar. The MCP and OpenCode ports are exposed
+only inside the Compose network and are not published to the host. `start.sh`
+also creates a stable random OpenCode server password under the mounted
+OpenCode state directory; set `OPENCODE_SERVER_PASSWORD` explicitly to override
+it.
 
 ## Host prerequisites
 
@@ -72,9 +79,9 @@ cp .env.example .env
 ```
 
 When `TUNNEL_NAME` and `APP_HOST` are both set, `start.sh` enables the tunnel
-profile. It builds both images, starts them, and waits for the application and
-the public URL to become healthy. `restart: unless-stopped` brings the
-containers back after Docker or the host restarts.
+profile. It builds the images, starts the services, and waits for the
+application, OpenCode, and public URL to become healthy. `restart:
+unless-stopped` brings the containers back after Docker or the host restarts.
 
 Useful commands:
 
@@ -86,8 +93,9 @@ docker compose --profile tunnel down
 
 ## Local-only mode
 
-Comment out both `TUNNEL_NAME` and `APP_HOST`, then run `./start.sh`. Only the
-app container starts, at `http://127.0.0.1:$PORT`.
+Comment out both `TUNNEL_NAME` and `APP_HOST`, then run `./start.sh`. The app and
+OpenCode services start without the tunnel; the UI is at
+`http://127.0.0.1:$PORT`.
 
 ## Repair a stale tunnel
 

@@ -419,6 +419,7 @@
     } else {
       summaryHTML = '<div style="display:flex;align-items:center;gap:8px;color:var(--fg-3);font:500 14px/1.5 var(--font-sans)">' + ico(ICON.refresh, 'class="ico spin" style="width:16px;height:16px"') + 'Summarizing…</div>';
     }
+    var summarySources = citationLinks(S.item._summaryCitations || []);
     var modelLabel = esc(S.item._summaryModel ? S.modelName(S.item._summaryModel) : S.modelName());
     var docLink = '<a href="' + API.documentUrl(it.id) + '" target="_blank" rel="noopener" style="font:600 13px/1.3 var(--font-sans)">Open the stored document</a>';
     var origLink = it.url
@@ -447,7 +448,7 @@
           '<span style="font:700 13px/1 var(--font-sans);color:var(--spark-700)">Readable summary</span>' +
           '<span style="margin-left:auto;font:600 11px/1 var(--font-sans);color:var(--fg-muted)">' + modelLabel + '</span>' +
         '</div>' +
-        '<div style="display:flex;flex-direction:column;gap:10px">' + summaryHTML + '</div>' +
+        '<div style="display:flex;flex-direction:column;gap:10px">' + summaryHTML + summarySources + '</div>' +
       '</div>' +
       '<button class="gym-press" id="chatArticleBtn" style="display:inline-flex;align-items:center;gap:8px;height:42px;padding:0 18px;border:none;background:var(--sky-500);color:#fff;border-radius:999px;cursor:pointer;font:700 14px/1 var(--font-sans);margin-bottom:18px">' +
         ico(ICON.send, 'style="width:17px;height:17px;stroke-width:2.2"') +
@@ -547,8 +548,9 @@
     var edges = d.edges.map(function (e) {
       var a = nodeById[e.src], b = nodeById[e.dst];
       if (!a || !b) return '';
-      var col = e.source === 'ai' ? 'var(--sky-500)' : 'var(--paper-400)';
-      var w = e.source === 'ai' ? 0.5 : 0.4;
+      var semantic = e.source === 'semantic' || e.source === 'ai';
+      var col = semantic ? 'var(--sky-500)' : 'var(--paper-400)';
+      var w = semantic ? 0.5 : 0.4;
       return '<line data-edge="' + e.id + '" x1="' + a.x + '" y1="' + a.y + '" x2="' + b.x + '" y2="' + b.y + '" stroke="' + col + '" stroke-width="' + w + '"></line>';
     }).join('');
     var nodes = d.nodes.map(function (n) {
@@ -556,17 +558,25 @@
     }).join('');
     var empty = d.nodes.length === 0
       ? '<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--fg-3);font:500 15px/1.5 var(--font-sans);text-align:center;padding:24px">Save terms in the knowledge base and they appear here automatically.</div>' : '';
+    var suggestions = (S.mapSuggestions || []).map(function (s) {
+      var a = nodeById[s.src], b = nodeById[s.dst];
+      if (!a || !b) return '';
+      return '<div class="map-suggestion"><span><strong>' + esc(a.label) + '</strong> ↔ <strong>' + esc(b.label) + '</strong><small>' + Math.round(s.similarity * 100) + '% semantic similarity</small></span>' +
+        '<button class="btn-ghost map-suggestion-accept" data-src="' + s.src + '" data-dst="' + s.dst + '">Add link</button></div>';
+    }).join('');
+    var suggestionsHTML = suggestions
+      ? '<section class="map-suggestions"><h2>Suggested relationships</h2>' + suggestions + '</section>' : '';
     return '<h1 style="font:700 32px/1.1 var(--font-display);letter-spacing:-.02em;color:var(--fg-1)">Knowledge map</h1>' +
-      '<p style="font:500 15px/1.5 var(--font-sans);color:var(--fg-3);margin-top:6px">Concepts you’ve met, linked by what explains what. Drag to rearrange; draw a link, or let AI suggest them.</p>' +
+      '<p style="font:500 15px/1.5 var(--font-sans);color:var(--fg-3);margin-top:6px">Concepts you’ve met, linked by what explains what. Drag to rearrange, draw a link, or review semantic matches.</p>' +
       '<div class="map-stage" id="mapStage">' +
         '<svg class="map-edges" viewBox="0 0 100 100" preserveAspectRatio="none">' + edges + '</svg>' + nodes + empty +
       '</div>' +
       '<div class="map-controls">' +
         '<button class="btn-ghost" id="mapLinkBtn">' + ico(ICON.link, 'style="width:15px;height:15px"') + 'Link two concepts</button>' +
-        '<button class="btn-spark" id="mapAiBtn">' + ico(ICON.spark, 'style="width:16px;height:16px;fill:#fff;stroke:none"') + 'AI-suggested links</button>' +
+        '<button class="btn-spark" id="mapAiBtn">' + ico(ICON.spark, 'style="width:16px;height:16px;fill:#fff;stroke:none"') + 'Find related concepts</button>' +
         '<span id="mapLinkHint" style="font:600 12px/1.3 var(--font-sans);color:var(--fg-muted)"></span>' +
       '</div>' +
-      '<div class="map-hint">' + ico(ICON.link, 'style="width:15px;height:15px"') + 'Tip: with “Link” active, tap two nodes to connect them. Tap a line to remove it.</div>';
+      '<div class="map-hint">' + ico(ICON.link, 'style="width:15px;height:15px"') + 'Tip: semantic matches are suggestions only. Add the relationships that are useful to you.</div>' + suggestionsHTML;
   }
 
   // ====================================================================
@@ -587,6 +597,15 @@
       return '<div style="font:700 10px/1 var(--font-sans);letter-spacing:.08em;text-transform:uppercase;color:var(--fg-muted);padding:9px 10px 5px">' + esc(g.name) + '</div>' + items;
     }).join('');
   }
+  function citationLinks(citations) {
+    var links = (citations || []).map(function (citation) {
+      var label = (citation.title || 'Source') + ' · ' + (citation.heading || citation.locator || 'passage');
+      return /^https?:\/\//i.test(citation.source_url || '')
+        ? '<a href="' + esc(citation.source_url) + '" target="_blank" rel="noopener noreferrer">' + esc(label) + '</a>'
+        : '<span>' + esc(label) + '</span>';
+    }).join('');
+    return links ? '<div class="chat-sources">' + links + '</div>' : '';
+  }
   function renderChatPanel() {
     var thread = S.thread.map(function (m) {
       if (m.role === 'user') {
@@ -594,18 +613,21 @@
       }
       // Assistant answers come back as markdown — render them through the same
       // hardened renderer the article body uses so lists/bold/code/headings show.
-      return '<div class="gym-md" style="align-self:flex-start;max-width:90%;background:var(--paper-200);color:var(--fg-1);padding:10px 14px;border-radius:14px 14px 14px 4px;font:500 15px/1.6 var(--font-sans)">' + renderMarkdownHTML(m.content) + '</div>';
+      return '<div style="align-self:flex-start;max-width:90%"><div class="gym-md" style="background:var(--paper-200);color:var(--fg-1);padding:10px 14px;border-radius:14px 14px 14px 4px;font:500 15px/1.6 var(--font-sans)">' + renderMarkdownHTML(m.content) + '</div>' + citationLinks(m.citations) + '</div>';
     }).join('');
     var grounded = '';
     var g = S.chatGrounded;
-    if (g && ((g.notes && g.notes.length) || (g.concepts && g.concepts.length))) {
+    if (g && ((g.notes && g.notes.length) || (g.concepts && g.concepts.length) || (g.citations && g.citations.length))) {
       var parts = [];
       var n = (g.notes || []).length;
       if (n) parts.push('Grounded in ' + n + ' note' + (n === 1 ? '' : 's') + ' from your knowledge base');
       if (g.concepts && g.concepts.length) parts.push('concepts: ' + g.concepts.join(', '));
+      if (g.citations && g.citations.length) parts.push(g.citations.length + ' source passage' + (g.citations.length === 1 ? '' : 's'));
+      var sourceLinks = citationLinks(g.citations || []);
       grounded = '<div class="chat-grounded" style="align-self:flex-start;display:flex;align-items:center;gap:6px;font:600 12px/1.5 var(--font-sans);color:var(--fg-muted)">' +
         ico(ICON.spark, 'style="fill:var(--spark-500);stroke:none;width:14px;height:14px;flex:0 0 auto"') +
-        '<span>' + esc(parts.join(' · ')) + '</span></div>';
+        '<span>' + esc(parts.join(' · ')) + '</span></div>' +
+        sourceLinks;
     }
     var loading = S.busy
       ? '<div style="align-self:flex-start;display:flex;align-items:center;gap:8px;color:var(--fg-3);font:500 14px/1.5 var(--font-sans)">' + ico(ICON.refresh, 'class="ico spin" style="width:16px;height:16px"') + 'Thinking…</div>' : '';
@@ -647,6 +669,7 @@
       (c.lead ? '<div style="font:700 16px/1.35 var(--font-display);letter-spacing:-.01em;color:var(--fg-1)">' + esc(c.lead) + '</div>' : '') +
       '<div class="gym-md" style="font:500 16px/1.7 var(--font-sans);color:var(--fg-2)">' + renderMarkdownHTML(c.body || '') + '</div>' +
       (c.analogy ? analogyBlock(c.analogy) : '') +
+      citationLinks(c.citations) +
     '</div>';
   }
   function renderPanel() {
@@ -658,7 +681,7 @@
         return '<div style="align-self:flex-end;max-width:86%;background:var(--sky-500);color:#fff;padding:10px 14px;border-radius:14px 14px 4px 14px;font:500 15px/1.5 var(--font-sans)">' + esc(m.content) + '</div>';
       }
       // Markdown answer -> hardened renderer (same path as the article body).
-      return '<div class="gym-md" style="align-self:flex-start;max-width:90%;background:var(--paper-200);color:var(--fg-1);padding:10px 14px;border-radius:14px 14px 14px 4px;font:500 15px/1.6 var(--font-sans)">' + renderMarkdownHTML(m.content) + '</div>';
+      return '<div style="align-self:flex-start;max-width:90%"><div class="gym-md" style="background:var(--paper-200);color:var(--fg-1);padding:10px 14px;border-radius:14px 14px 14px 4px;font:500 15px/1.6 var(--font-sans)">' + renderMarkdownHTML(m.content) + '</div>' + citationLinks(m.citations) + '</div>';
     }).join('');
     var savedConfirm = S.justSaved
       ? '<div style="display:flex;align-items:center;gap:9px;padding:11px 13px;border-radius:10px;background:var(--grass-100);color:var(--grass-600);font:600 14px/1.4 var(--font-sans)">' + ico(ICON.check, 'style="width:17px;height:17px;stroke-width:2.6"') + 'Saved to your knowledge base.<button class="gym-press panel-gosaved" style="margin-left:auto;border:none;background:none;color:var(--fg-link);cursor:pointer;font:700 14px/1 var(--font-sans)">Open</button></div>' : '';
@@ -687,7 +710,7 @@
       bodyBlock = '<div style="background:var(--bg-surface);border:1px solid var(--border-hair);border-radius:14px;padding:16px 18px;display:flex;flex-direction:column;gap:10px">' +
         (loading || (
           '<div style="font:700 19px/1.35 var(--font-display);letter-spacing:-.01em;color:var(--fg-1)">' + esc(a.lead) + '</div>' +
-          '<div class="gym-md" style="font:500 16px/1.7 var(--font-sans);color:var(--fg-2)">' + renderMarkdownHTML(a.body) + '</div>' + analogy)) +
+          '<div class="gym-md" style="font:500 16px/1.7 var(--font-sans);color:var(--fg-2)">' + renderMarkdownHTML(a.body) + '</div>' + analogy + citationLinks(S.answerCitations))) +
       '</div>';
     }
     // Save is available when there is something to save (concepts, or an answer).
@@ -903,6 +926,7 @@
       S.item = it;
       S.summaryTerms = it.summary_terms || [];
       if (it.summary_readable) { it._summary = it.summary_readable; }
+      it._summaryCitations = it.summary_citations || [];
       // Try to load markdown when an original could be converted. The first
       // open may trigger a lazy auto-conversion server-side, so show a small
       // loading state until it resolves (404 falls back to abstract).
@@ -927,6 +951,7 @@
           if (S.item && S.item.id === id) {
             S.item._summary = res.summary;
             S.item._summaryModel = res.model;
+            S.item._summaryCitations = res.citations || [];
             S.summaryTerms = res.terms || S.summaryTerms;
             render();
           }
@@ -986,7 +1011,7 @@
 
   function resetPanel(span, mode) {
     S.panelOpen = true; S.chatMode = false; S.selText = span; S.mode = mode;
-    S.answer = null; S.thread = []; S.draft = '';
+    S.answer = null; S.answerCitations = []; S.thread = []; S.draft = '';
     S.explainConcepts = null; S.clarifyQuestion = null;
     S.savedEntryId = null; S.justSaved = false; S.modelMenuOpen = false;
     hideToolbar();
@@ -1034,6 +1059,7 @@
       S.busy = false;
       S.clarifyQuestion = res.question || null;
       S.explainConcepts = res.concepts || [];
+      S.answerCitations = [];
       // A reused concept is already saved; reflect that on the Save button.
       var reused = (S.explainConcepts || []).filter(function (c) { return c.reused; });
       if (reused.length && reused.length === (S.explainConcepts || []).length) {
@@ -1073,7 +1099,8 @@
       S.busy = false;
       S.chatEntryId = res.kb_entry_id || S.chatEntryId;
       S.thread.push({ role: 'assistant', content: answerText(res.answer) });
-      S.chatGrounded = res.grounded || null;
+      S.chatGrounded = res.grounded || {};
+      S.chatGrounded.citations = res.citations || [];
       syncPanel();
     }).catch(function () { S.busy = false; toast('Chat failed'); syncPanel(); });
   }
@@ -1089,9 +1116,10 @@
       S.busy = false;
       if (message) {
         S.thread.push({ role: 'user', content: message });
-        S.thread.push({ role: 'assistant', content: answerText(res.answer) });
+        S.thread.push({ role: 'assistant', content: answerText(res.answer), citations: res.citations || [] });
       } else {
         S.answer = res.answer;
+        S.answerCitations = res.citations || [];
       }
       syncPanel();
     }).catch(function () { S.busy = false; toast('AI request failed'); syncPanel(); });
@@ -1102,7 +1130,7 @@
     return parts.filter(Boolean).join('\n');
   }
   function setMode(mode) {
-    S.mode = mode; S.answer = null;
+    S.mode = mode; S.answer = null; S.answerCitations = [];
     S.explainConcepts = null; S.clarifyQuestion = null;
     S.justSaved = false; S.savedEntryId = null;
     S.busy = true; syncPanel();
@@ -1259,11 +1287,25 @@
       setHint();
     });
     if (aiBtn) aiBtn.addEventListener('click', function () {
-      aiBtn.disabled = true; aiBtn.innerHTML = '<svg viewBox="0 0 24 24" class="ico spin" style="width:16px;height:16px;stroke:#fff">' + ICON.refresh + '</svg>Asking AI…';
-      API.mapAiLinks(S.model).then(function (r) {
-        toast(r.added ? ('Added ' + r.added + ' link' + (r.added === 1 ? '' : 's')) : 'No new links found');
-        loadMap();
-      }).catch(function () { toast('AI links failed'); loadMap(); });
+      aiBtn.disabled = true; aiBtn.innerHTML = '<svg viewBox="0 0 24 24" class="ico spin" style="width:16px;height:16px;stroke:#fff">' + ICON.refresh + '</svg>Comparing concepts…';
+      API.mapAiLinks().then(function (r) {
+        S.mapSuggestions = r.suggestions || [];
+        toast(S.mapSuggestions.length ? ('Found ' + S.mapSuggestions.length + ' possible relationship' + (S.mapSuggestions.length === 1 ? '' : 's')) : 'No new relationships found');
+        render();
+      }).catch(function () { toast('Concept matching failed'); render(); });
+    });
+    document.querySelectorAll('.map-suggestion-accept').forEach(function (button) {
+      button.addEventListener('click', function () {
+        var src = Number(button.dataset.src), dst = Number(button.dataset.dst);
+        button.disabled = true;
+        API.mapEdgeAdd(src, dst, 'semantic').then(function () {
+          S.mapSuggestions = (S.mapSuggestions || []).filter(function (s) {
+            return !(s.src === src && s.dst === dst);
+          });
+          toast('Relationship added');
+          loadMap();
+        }).catch(function () { toast('Could not add relationship'); loadMap(); });
+      });
     });
     // edges: tap to delete
     stage.querySelectorAll('line[data-edge]').forEach(function (ln) {

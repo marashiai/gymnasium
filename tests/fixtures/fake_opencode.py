@@ -9,7 +9,7 @@ Supports two subcommands used by university.ai:
     opencode run <prompt> --model <id> --format json
         -> prints a newline-delimited JSON event stream whose final assistant
            text is a deterministic, schema-correct JSON answer derived from the
-           prompt (so ai.summarize_item / explain / suggest_links all parse).
+           prompt (so ai.summarize_item / explain / extract_concepts all parse).
 
 No network, no real model — purely deterministic.
 """
@@ -43,17 +43,6 @@ def main():
                 "terms": ["mixture-of-experts", "router", "context window"],
             }
             _emit(json.dumps(payload))
-        elif "json array" in low and "id numbers" in low:
-            # suggest_links: return the first listed id, if any.
-            ids = []
-            for line in prompt.splitlines():
-                line = line.strip()
-                if line.startswith("- id "):
-                    try:
-                        ids.append(int(line.split()[2].rstrip(":")))
-                    except (ValueError, IndexError):
-                        pass
-            _emit(json.dumps(ids[:1]))
         elif '"concepts"' in low and '"question"' in low:
             # extract_concepts: pull the selected text back out of the prompt and
             # derive a deterministic concept list. A selection containing the

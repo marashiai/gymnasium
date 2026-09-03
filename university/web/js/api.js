@@ -102,10 +102,10 @@
     kbSave: function (payload) { return request('POST', '/api/kb/save', payload); },
     deleteKbEntry: function (id) { return request('DELETE', '/api/kb/' + id); },
     map: function () { return request('GET', '/api/map'); },
-    mapEdgeAdd: function (src, dst) { return request('POST', '/api/map/edge', { src: src, dst: dst }); },
+    mapEdgeAdd: function (src, dst, source) { return request('POST', '/api/map/edge', { src: src, dst: dst, source: source || 'manual' }); },
     mapEdgeDelete: function (id) { return request('DELETE', '/api/map/edge/' + id); },
     mapPosition: function (conceptId, x, y) { return request('POST', '/api/map/position', { concept_id: conceptId, x: x, y: y }); },
-    mapAiLinks: function (model) { return request('POST', '/api/map/ai-links', { model: model }); },
+    mapAiLinks: function () { return request('POST', '/api/map/ai-links', {}); },
     refresh: function (kind, days) { return request('POST', '/api/refresh', { kind: kind, days: days }); },
     refreshStatus: function () { return request('GET', '/api/refresh/status'); }
   };

@@ -2,7 +2,7 @@
 
 A saved kb_entry becomes a concept node (one per entry). Positions are
 persisted so a drag sticks. Edges are either 'manual' (the user drew them) or
-'ai' (suggested by the model via ai.suggest_links).
+'semantic' (the user accepted a vector-similarity suggestion).
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import sqlite3
 from typing import Dict, List, Optional
 
-from . import ai
 from .db import utcnow
 
 _TONES = ["spark", "sky", "grass", "berry", "sun", "rose"]
@@ -130,26 +129,3 @@ def add_edge(conn: sqlite3.Connection, src: int, dst: int, source: str = "manual
 def delete_edge(conn: sqlite3.Connection, edge_id: int) -> None:
     conn.execute("DELETE FROM concept_edge WHERE id=?", (edge_id,))
     conn.commit()
-
-
-def ai_links(conn: sqlite3.Connection, model: str) -> Dict[str, object]:
-    """Ask the model for related links across concepts; store as 'ai' edges."""
-    refresh_from_entries(conn)
-    nodes = [
-        {"id": int(r["id"]), "label": r["label"]}
-        for r in conn.execute("SELECT id, label FROM concept ORDER BY id").fetchall()
-    ]
-    if len(nodes) < 2:
-        return {"added": 0, "nodes": len(nodes)}
-    before = conn.execute("SELECT COUNT(*) AS c FROM concept_edge").fetchone()["c"]
-    for node in nodes:
-        others = [n for n in nodes if n["id"] != node["id"]]
-        try:
-            related = ai.suggest_links(node, others, model)
-        except ai.AIError as exc:
-            print("[map] ai_links failed for {}: {}".format(node["label"], exc))
-            continue
-        for dst in related:
-            add_edge(conn, node["id"], dst, source="ai")
-    after = conn.execute("SELECT COUNT(*) AS c FROM concept_edge").fetchone()["c"]
-    return {"added": after - before, "nodes": len(nodes)}

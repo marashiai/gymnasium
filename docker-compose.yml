@@ -8,6 +8,12 @@ services:
     environment:
       GYM_MODEL: ${GYM_MODEL:-}
       OPENCODE_BIN: opencode
+      OPENCODE_URL: http://opencode:4096
+      OPENCODE_RAG_AGENT: gymnasium
+      OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME:-opencode}
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-}
+      GYM_MCP_HOST: 0.0.0.0
+      GYM_MCP_PORT: 8010
       OPENALEX_MAILTO: ${OPENALEX_MAILTO:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GH_TOKEN: ${GH_TOKEN:-}
@@ -17,6 +23,31 @@ services:
       - ${OPENCODE_DATA_DIR:-~/.gymnasium-opencode}:/root/.local/share/opencode
     ports:
       - "127.0.0.1:${PORT:-8000}:8000"
+    expose:
+      - "8010"
+    restart: unless-stopped
+
+  opencode:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]
+    environment:
+      OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME:-opencode}
+      OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD:-}
+    volumes:
+      - ${OPENCODE_DATA_DIR:-~/.gymnasium-opencode}:/root/.local/share/opencode
+    expose:
+      - "4096"
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import base64,os,urllib.request as u; token=base64.b64encode((os.environ.get('OPENCODE_SERVER_USERNAME','opencode')+':'+os.environ.get('OPENCODE_SERVER_PASSWORD','')).encode()).decode(); u.urlopen(u.Request('http://127.0.0.1:4096/global/health',headers={'Authorization':'Basic '+token}),timeout=4).read(1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
     restart: unless-stopped
 
   cloudflared:

@@ -26,11 +26,30 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    _load_vector_extension(conn)
     try:
         conn.execute("PRAGMA journal_mode = WAL")
     except sqlite3.OperationalError:
         pass
     return conn
+
+
+def _load_vector_extension(conn: sqlite3.Connection) -> bool:
+    """Load sqlite-vec when installed; lexical retrieval remains available."""
+    try:
+        import sqlite_vec
+
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+        return True
+    except (ImportError, AttributeError, sqlite3.Error):
+        try:
+            conn.enable_load_extension(False)
+        except (AttributeError, sqlite3.Error):
+            pass
+        return False
 
 
 def _fts5_available(conn: sqlite3.Connection) -> bool:
@@ -68,6 +87,7 @@ CREATE TABLE IF NOT EXISTS corpus_item (
     abstract        TEXT,
     summary_readable TEXT,
     summary_terms   TEXT,
+    summary_citations TEXT,
     why             TEXT,
     signal          INTEGER DEFAULT 0,       -- normalized 0..100
     published_at    TEXT,
@@ -136,7 +156,7 @@ CREATE TABLE IF NOT EXISTS concept_edge (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     src_concept_id  INTEGER NOT NULL,
     dst_concept_id  INTEGER NOT NULL,
-    source          TEXT NOT NULL DEFAULT 'manual',  -- 'ai' | 'manual'
+    source          TEXT NOT NULL DEFAULT 'manual',  -- 'manual' | 'semantic'
     created_at      TEXT NOT NULL,
     UNIQUE (src_concept_id, dst_concept_id),
     FOREIGN KEY (src_concept_id) REFERENCES concept(id) ON DELETE CASCADE,
@@ -163,6 +183,43 @@ CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts USING fts5(
     lead,
     body,
     messages
+);
+
+CREATE TABLE IF NOT EXISTS rag_passage (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_type     TEXT NOT NULL,       -- 'item' | 'kb'
+    source_id       INTEGER NOT NULL,
+    item_id         INTEGER,
+    ordinal         INTEGER NOT NULL,
+    heading         TEXT,
+    locator         TEXT NOT NULL,
+    content         TEXT NOT NULL,
+    content_hash    TEXT NOT NULL,
+    embedding_model TEXT,
+    created_at      TEXT NOT NULL,
+    UNIQUE (source_type, source_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_passage_source
+    ON rag_passage(source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_rag_passage_item ON rag_passage(item_id);
+
+CREATE TABLE IF NOT EXISTS rag_index_state (
+    source_type     TEXT NOT NULL,
+    source_id       INTEGER NOT NULL,
+    content_hash    TEXT NOT NULL,
+    chunker_version TEXT NOT NULL,
+    embedding_model TEXT,
+    status          TEXT NOT NULL,
+    error           TEXT,
+    indexed_at      TEXT NOT NULL,
+    PRIMARY KEY (source_type, source_id)
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS rag_fts USING fts5(
+    passage_id UNINDEXED,
+    heading,
+    content
 );
 """
 
@@ -229,13 +286,23 @@ def bootstrap(conn: sqlite3.Connection) -> None:
             "SQLite FTS5 is not available in this Python build; the knowledge "
             "base search requires it. Rebuild Python/SQLite with FTS5 enabled."
         )
+    _load_vector_extension(conn)
     conn.executescript(SCHEMA)
     conn.executescript(FTS_SCHEMA)
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS rag_vec USING vec0("
+            "embedding float[384] distance_metric=cosine)"
+        )
+    except sqlite3.OperationalError:
+        # The application remains usable with FTS5 when sqlite-vec cannot load.
+        pass
     # Migrations for DBs created before a column existed.
     _ensure_column(conn, "corpus_item", "markdown_path", "TEXT")
     _ensure_column(conn, "corpus_item", "markdown_source", "TEXT")
     _ensure_column(conn, "corpus_item", "added_by_user", "INTEGER DEFAULT 0")
     _ensure_column(conn, "corpus_item", "doc_uploaded", "INTEGER DEFAULT 0")
+    _ensure_column(conn, "corpus_item", "summary_citations", "TEXT")
     # Backfill the back-reference table from each entry's originating item_id so
     # existing concepts already list their origin article. Idempotent: the
     # UNIQUE constraint + INSERT OR IGNORE means re-running adds nothing.

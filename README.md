@@ -203,8 +203,8 @@ fixtures — no live network.
 ## university — the personal AI university (web app)
 
 `university` is the reading-and-studying front end that sits on top of the two
-trackers. It is a stdlib-only Python + SQLite backend (no new third-party
-dependencies) plus a mobile-first web UI, served together by one command:
+trackers. It is a Python + SQLite backend plus a mobile-first web UI, served
+together by one command:
 
 ```bash
 pip install -e .
@@ -212,9 +212,9 @@ gymnasium adduser maya hunter2          # plaintext, alphanumeric-only
 gymnasium --ingest-on-start             # serves http://127.0.0.1:8077
 ```
 
-For a persistent deployment, Docker Compose packages the app and OpenCode CLI
-with a Cloudflare Tunnel sidecar while bind-mounting `data/`, `reports/`,
-OpenCode state, and Cloudflare credentials from the host:
+For a persistent deployment, Docker Compose packages the app, a persistent
+OpenCode service, and an optional Cloudflare Tunnel sidecar while bind-mounting
+`data/`, `reports/`, OpenCode state, and Cloudflare credentials from the host:
 
 ```bash
 cp .env.example .env
@@ -235,17 +235,22 @@ What it does:
 - **Document store** — opening an item (or saving a fact) fetches the original
   paper/repo document once and keeps it on disk under `data/documents/` so a
   saved fact always points at a concrete local file.
-- **AI via opencode only** — all AI goes through the `opencode` CLI
+- **Generation via OpenCode only** — all generative AI goes through OpenCode
   (`OPENCODE_BIN`), with the model list pulled dynamically from
   `opencode models` (no hardcoded providers). It produces readable summaries,
-  explains/summarizes/answers about any selected span, and suggests
-  knowledge-map links.
+  and explains, summarizes, or answers questions about selected text.
+- **Local hybrid RAG** — fetched papers, READMEs, saved notes, and concepts are
+  indexed in SQLite with FTS5 plus 384-dimensional local embeddings. OpenCode
+  searches the index through a private, read-only MCP server and returns source
+  passage citations. Indexing is incremental and falls back to lexical search
+  if vector search is unavailable.
 - **Reading flow** — a faithful build of the Gymnasium design handoff: a feed,
   a reader with select-any-span → Explain / Summarize / Ask, a conversation
   panel whose whole thread can be **saved** to the knowledge base (FTS5 search
   across every turn), and an interactive **knowledge map** (drag, manual links,
-  AI-suggested links). One fluid layout spans phone / tablet / desktop; light
-  and dark themes persist.
+  reviewable semantic-link suggestions). One fluid layout spans phone / tablet /
+  desktop; light and dark themes persist. Mind-map relationships use vector
+  similarity and only become durable links after the reader accepts them.
 
 `pytest` covers the backend offline (AI stubbed via a fake `opencode`, network
 patched, trackers stubbed). `data/` (the SQLite DB and the document store) is
