@@ -1,101 +1,104 @@
-# Hosting Gymnasium on gymnasium.marashi.ai (Cloudflare named tunnel)
+# Hosting Gymnasium with Docker and Cloudflare Tunnel
 
-`start.sh` boots the Gymnasium app and, when configured, publishes it at
-`https://gymnasium.marashi.ai` through a Cloudflare **named** tunnel — no
-inbound ports, no public IP. `reset-tunnel.sh` repairs a stale tunnel/DNS
-mapping.
+Gymnasium runs as a two-container Compose application:
 
-The same `start.sh` runs **local-only** when the tunnel env is unset, so
-it doubles as the plain dev launcher.
+- `app` contains Python, the Gymnasium package, document conversion
+  dependencies, and the OpenCode CLI.
+- `cloudflared` owns the named tunnel and routes the public hostname to the
+  app over the private Compose network.
 
-## ⚠️ Security — plaintext auth, publicly reachable
+All mutable state remains on the host. Images contain no database, documents,
+reports, account credentials, or Cloudflare credentials.
 
-The app authenticates with **plaintext credentials** behind a single
-login gate. Once the tunnel is up the app is reachable by anyone on the
-internet, so **that login gate is the only thing protecting it.**
+| State | Default host path | Container path |
+| --- | --- | --- |
+| SQLite, documents, caches | `./data` | `/data` |
+| Ingest reports | `./reports` | `/reports` |
+| OpenCode auth and state | `~/.gymnasium-opencode` | `/root/.local/share/opencode` |
+| Cloudflare cert and tunnel JSON | `~/.cloudflared` | `/etc/cloudflared` |
 
-- Use a **strong, unique password** for every account (`gymnasium adduser`).
-- Treat any account as compromised if its password is reused elsewhere.
-- **Optional follow-up:** put **Cloudflare Access** in front of
-  `gymnasium.marashi.ai` for a real second factor (SSO / one-time PIN).
-  This is recommended but not wired up by these scripts.
+## Security
 
-## One-time operator setup
+The application stores its own usernames and passwords in plaintext. Use a
+strong, unique password and consider putting Cloudflare Access in front of the
+site. The Compose app port is published only on `127.0.0.1`; public traffic
+reaches it through the tunnel sidecar.
 
-These steps need the operator's Cloudflare account and a machine that
-stays running. They are **not** done by CI and cannot be done from a
-sandbox.
+## Host prerequisites
 
-1. **Install cloudflared**
-
-   ```bash
-   brew install cloudflared        # macOS
-   # or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
-   ```
-
-2. **Log in to Cloudflare** and authorize the `marashi.ai` zone. This
-   writes `~/.cloudflared/cert.pem`, which `start.sh` checks for.
-
-   ```bash
-   cloudflared tunnel login
-   ```
-
-   In the browser that opens, pick the **marashi.ai** zone.
-
-3. **Create a Gymnasium login** (plaintext-auth account):
-
-   ```bash
-   gymnasium adduser <username> <password>
-   ```
-
-4. **Configure and start**
-
-   ```bash
-   cp .env.example .env      # keeps TUNNEL_NAME=gymnasium, APP_HOST=gymnasium.marashi.ai
-   ./start.sh
-   ```
-
-   On first run `start.sh` creates the `gymnasium` tunnel, routes
-   `gymnasium.marashi.ai` to it, writes the ingress config under
-   `.runtime/cloudflared.yml`, and runs `cloudflared` in the background.
-   It prints both the public URL (`https://gymnasium.marashi.ai`) and the
-   local URL. Leave the process running to keep the site up.
-
-## Local-only (no tunnel)
-
-Leave `TUNNEL_NAME` / `APP_HOST` unset (the default `.env.example` sets
-them, so either edit `.env` to comment them out, or just run without a
-`.env`). `start.sh` then serves the app on `http://localhost:$PORT`
-(default `8000`) and starts no tunnel.
+The host needs a rootless Docker Engine with the Compose plugin. The rootless
+daemon runs as the deployment account, uses
+`/run/user/$UID/docker.sock`, and should be enabled as a systemd user service
+with login lingering enabled. Select its context before starting Gymnasium:
 
 ```bash
-PORT=8000 ./start.sh
+docker context use rootless
+docker info --format '{{json .SecurityOptions}}'
 ```
 
-## Fixing a stale tunnel (Error 1033)
+The output must include `name=rootless`; `start.sh` refuses to deploy through a
+rootful daemon. Neither Python, OpenCode, nor cloudflared is required on the
+host.
 
-If `gymnasium.marashi.ai` returns **Error 1033** (Argo Tunnel error), the
-DNS CNAME is pointing at a tunnel UUID that no longer exists — common
-after switching machines. Recreate the tunnel and re-route DNS:
+The processes run as UID 0 *inside* their containers so that they map to the
+unprivileged deployment account outside the rootless user namespace. They do
+not have host root privileges. This mapping preserves access to the account's
+host-owned bind mounts, including mode-0600 credentials.
+
+The Cloudflare directory must contain `cert.pem` and the credential JSON for
+the configured named tunnel. To preserve an existing URL during a machine
+migration, copy those files to the same host directory and keep the existing
+`TUNNEL_NAME` and `APP_HOST` values.
+
+OpenCode credentials can be initialized on the host before startup:
+
+```bash
+mkdir -p ~/.gymnasium-opencode
+cp ~/.local/share/opencode/auth.json ~/.gymnasium-opencode/auth.json
+chmod 600 ~/.gymnasium-opencode/auth.json
+```
+
+Alternatively, authenticate through a one-off container:
+
+```bash
+docker compose run --rm app opencode auth login
+```
+
+## Configure and start
+
+```bash
+cp .env.example .env
+./start.sh --detach
+```
+
+When `TUNNEL_NAME` and `APP_HOST` are both set, `start.sh` enables the tunnel
+profile. It builds both images, starts them, and waits for the application and
+the public URL to become healthy. `restart: unless-stopped` brings the
+containers back after Docker or the host restarts.
+
+Useful commands:
+
+```bash
+docker compose --profile tunnel ps
+docker compose --profile tunnel logs -f
+docker compose --profile tunnel down
+```
+
+## Local-only mode
+
+Comment out both `TUNNEL_NAME` and `APP_HOST`, then run `./start.sh`. Only the
+app container starts, at `http://127.0.0.1:$PORT`.
+
+## Repair a stale tunnel
+
+The normal startup reuses the existing named tunnel and idempotently maintains
+its DNS route. If the tunnel itself must be replaced, run:
 
 ```bash
 ./reset-tunnel.sh
+./start.sh --detach
 ```
 
-If it reports that an A/AAAA record blocks the route, delete that record
-in **dash.cloudflare.com → marashi.ai → DNS → Records** and re-run it.
-
-## How it works
-
-- `start.sh` auto-loads `.env`, boots the app
-  (`gymnasium --port $PORT --db $DB --reports $REPORTS --docs-dir $DOCS`,
-  falling back to `python3 -m university.server` from a source checkout),
-  and waits until it answers on `http://localhost:$PORT/`.
-- In tunnel mode it verifies the cloudflared login, creates the tunnel if
-  missing, resolves its UUID, checks the per-tunnel credentials file
-  (`~/.cloudflared/<uuid>.json`), routes DNS (unless `SKIP_DNS=1`), writes
-  an ingress config mapping `APP_HOST → http://localhost:$PORT` with a
-  `404` catch-all, and runs `cloudflared` in the background.
-- An exit trap kills both the app and `cloudflared`. Logs go under
-  `logs/` (`gymnasium.log`, `cloudflared.log`); the generated tunnel
-  config lives under `.runtime/`. Both directories are git-ignored.
+Resetting deletes and recreates the named tunnel, writes its new credential
+JSON into the host-mounted Cloudflare directory, and points the existing
+hostname at the new tunnel.

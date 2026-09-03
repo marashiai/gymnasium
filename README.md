@@ -212,6 +212,18 @@ gymnasium adduser maya hunter2          # plaintext, alphanumeric-only
 gymnasium --ingest-on-start             # serves http://127.0.0.1:8077
 ```
 
+For a persistent deployment, Docker Compose packages the app and OpenCode CLI
+with a Cloudflare Tunnel sidecar while bind-mounting `data/`, `reports/`,
+OpenCode state, and Cloudflare credentials from the host:
+
+```bash
+cp .env.example .env
+./start.sh --detach
+```
+
+See [the Docker hosting guide](docs/CLOUDFLARE_TUNNEL.md) for the host paths,
+migration contract, and operational commands.
+
 What it does:
 
 - **Auth gate** — a plaintext, alphanumeric login (single-tenant, personal).

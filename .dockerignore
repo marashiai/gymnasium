@@ -1,0 +1,15 @@
+/.git
+/.runtime
+/.playwright-mcp
+/.pytest_cache
+/.venv
+/data
+/lib
+/logs
+/reports
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+*.egg-info
+*.log
+.env

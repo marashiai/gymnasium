@@ -1,0 +1,42 @@
+name: gymnasium
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      GYM_MODEL: ${GYM_MODEL:-}
+      OPENCODE_BIN: opencode
+      OPENALEX_MAILTO: ${OPENALEX_MAILTO:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GH_TOKEN: ${GH_TOKEN:-}
+    volumes:
+      - ${GYMNASIUM_DATA_DIR:-./data}:/data
+      - ${GYMNASIUM_REPORTS_DIR:-./reports}:/reports
+      - ${OPENCODE_DATA_DIR:-~/.gymnasium-opencode}:/root/.local/share/opencode
+    ports:
+      - "127.0.0.1:${PORT:-8000}:8000"
+    restart: unless-stopped
+
+  cloudflared:
+    profiles: [tunnel]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cloudflared
+    environment:
+      TUNNEL_NAME: ${TUNNEL_NAME:-}
+      APP_HOST: ${APP_HOST:-}
+      SKIP_DNS: ${SKIP_DNS:-}
+    volumes:
+      - ${CLOUDFLARED_DIR:-~/.cloudflared}:/etc/cloudflared
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS https://${APP_HOST:-}/ >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 18
+      start_period: 10s
+    restart: unless-stopped
