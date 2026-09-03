@@ -23,19 +23,6 @@ mkdir -p \
   "$GYMNASIUM_REPORTS_DIR" \
   "$OPENCODE_DATA_DIR"
 
-# Keep the private OpenCode HTTP service authenticated. The stable credential
-# lives beside OpenCode's other host-mounted state and is never printed.
-if [ -z "${OPENCODE_SERVER_PASSWORD:-}" ]; then
-  opencode_password_file="${OPENCODE_DATA_DIR}/server-password"
-  if [ ! -s "$opencode_password_file" ]; then
-    umask 077
-    od -An -N32 -tx1 /dev/urandom | tr -d ' \n' > "$opencode_password_file"
-  fi
-  OPENCODE_SERVER_PASSWORD="$(tr -d '\r\n' < "$opencode_password_file")"
-  export OPENCODE_SERVER_PASSWORD
-fi
-export OPENCODE_SERVER_USERNAME="${OPENCODE_SERVER_USERNAME:-opencode}"
-
 security_options="$(docker info --format '{{json .SecurityOptions}}' 2>/dev/null)" || {
   echo "cannot reach the Docker daemon; select the rootless context first" >&2
   echo "  docker context use rootless" >&2

@@ -15,7 +15,6 @@ import json
 import os
 import re
 import subprocess
-import base64
 from typing import Dict, List, Optional
 from urllib import error as urlerror
 from urllib import parse as urlparse
@@ -101,13 +100,6 @@ def _remote_request(base_url: str, path: str, payload: Optional[dict],
                     timeout: int, method: str = "POST"):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = {"Content-Type": "application/json"}
-    password = os.environ.get("OPENCODE_SERVER_PASSWORD")
-    if password:
-        username = os.environ.get("OPENCODE_SERVER_USERNAME", "opencode")
-        token = base64.b64encode(
-            "{}:{}".format(username, password).encode("utf-8")
-        ).decode("ascii")
-        headers["Authorization"] = "Basic " + token
     req = urlrequest.Request(
         base_url.rstrip("/") + path, data=data, headers=headers, method=method)
     try:

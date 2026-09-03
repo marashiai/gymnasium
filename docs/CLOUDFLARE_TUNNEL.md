@@ -26,10 +26,7 @@ The application stores its own usernames and passwords in plaintext. Use a
 strong, unique password and consider putting Cloudflare Access in front of the
 site. The Compose app port is published only on `127.0.0.1`; public traffic
 reaches it through the tunnel sidecar. The MCP and OpenCode ports are exposed
-only inside the Compose network and are not published to the host. `start.sh`
-also creates a stable random OpenCode server password under the mounted
-OpenCode state directory; set `OPENCODE_SERVER_PASSWORD` explicitly to override
-it.
+only inside the Compose network and are not published to the host.
 
 ## Host prerequisites
 
