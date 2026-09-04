@@ -41,9 +41,10 @@
     selText: '',
     mode: 'explain',          // explain | summarize | ask
     answer: null,             // {lead, body, analogy?}
+    answerCitations: [],      // resolved source passages for the latest answer
     explainConcepts: null,    // [{label,lead,body,analogy,reused,kb_entry_id}]
     clarifyQuestion: null,    // AI's clarifying question when the span is vague
-    thread: [],               // [{role:'user'|'assistant', content}]
+    thread: [],               // [{role:'user'|'assistant', content, citations?}]
     savedEntryId: null,       // set once the entry is persisted
     justSaved: false,
     // article chat (whole-article, knowledge-grounded conversation)
@@ -61,6 +62,7 @@
     kbQuery: '',
     conceptDetail: null,      // loaded kb_entry (+linked_items) for the detail view
     mapData: { nodes: [], edges: [] },
+    mapSuggestions: [],       // semantic links awaiting explicit acceptance
     // misc
     busy: false,
 

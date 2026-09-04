@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
-from . import ai, auth, docs, feed, ingest, map_store, refresh, retrieval
+from . import ai, auth, docs, feed, ingest, map_store, rag, rag_mcp, refresh, retrieval
 from .db import bootstrap, connect, link_source, reindex_entry, utcnow
 
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -41,7 +41,8 @@ class AppContext:
     """Shared, thread-safe application state."""
 
     def __init__(self, db_path: str, reports_dir: str, docs_dir: str,
-                 default_model: Optional[str] = None):
+                 default_model: Optional[str] = None,
+                 rag_background: bool = False):
         self.db_path = db_path
         self.reports_dir = reports_dir
         self.docs_dir = docs_dir
@@ -49,9 +50,26 @@ class AppContext:
         self.lock = threading.Lock()
         self.conn = connect(db_path)
         bootstrap(self.conn)
+        embeddings_enabled = os.environ.get(
+            "GYM_RAG_EMBEDDINGS", "on").lower() not in ("0", "off", "false")
+        self.rag = rag.RAGService(
+            self.new_conn, docs_dir, enable_embeddings=embeddings_enabled)
+        self.rag_indexer = rag.RAGIndexer(self.rag)
+        if rag_background:
+            self.rag_indexer.start(initial_scan=True)
 
     def new_conn(self) -> sqlite3.Connection:
         return connect(self.db_path)
+
+    def start_mcp(self, host: str, port: int) -> threading.Thread:
+        thread = threading.Thread(
+            target=rag_mcp.run_server,
+            args=(self.rag, host, int(port)),
+            name="rag-mcp",
+            daemon=True,
+        )
+        thread.start()
+        return thread
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -312,6 +330,8 @@ class Handler(BaseHTTPRequestHandler):
             "published_at": row["published_at"],
             "summary_readable": json.loads(row["summary_readable"]) if row["summary_readable"] else None,
             "summary_terms": json.loads(row["summary_terms"]) if row["summary_terms"] else None,
+            "summary_citations": json.loads(row["summary_citations"])
+            if row["summary_citations"] else [],
             "doc_path": row["doc_path"],
             "has_markdown": bool(row["markdown_path"]),
             "markdown_source": row["markdown_source"],
@@ -407,6 +427,7 @@ class Handler(BaseHTTPRequestHandler):
                     (url, title, url, now, now))
                 item_id = int(cur.lastrowid)
             self.ctx.conn.commit()
+        self.ctx.rag_indexer.enqueue("item", item_id)
         self._send_json({"ok": True, "id": item_id, "kind": "paper"})
 
     def _create_repo_item(self, repo: Tuple[str, str], title: str):
@@ -436,6 +457,7 @@ class Handler(BaseHTTPRequestHandler):
                     (full_name, title, html_url, raw, now, now))
                 item_id = int(cur.lastrowid)
             self.ctx.conn.commit()
+        self.ctx.rag_indexer.enqueue("item", item_id)
         self._send_json({"ok": True, "id": item_id, "kind": "repo"})
 
     def _create_pdf_item(self, ctype: str):
@@ -492,6 +514,7 @@ class Handler(BaseHTTPRequestHandler):
                 "UPDATE corpus_item SET doc_path=?, doc_fetched_at=? WHERE id=?",
                 (doc_rel, now, item_id))
             self.ctx.conn.commit()
+        self.ctx.rag_indexer.enqueue("item", item_id)
         self._send_json({"ok": True, "id": item_id, "kind": "paper"})
 
     def _api_items_delete(self, item_id: int):
@@ -512,6 +535,12 @@ class Handler(BaseHTTPRequestHandler):
             docs.remove_item_dir(row, self.ctx.docs_dir)
             self.ctx.conn.execute("DELETE FROM corpus_item WHERE id=?", (item_id,))
             self.ctx.conn.commit()
+        rag_conn = self.ctx.new_conn()
+        try:
+            rag.delete_source(rag_conn, "item", item_id)
+        finally:
+            rag_conn.close()
+        self.ctx.rag_indexer.enqueue("item", item_id)
         self._send_json({"ok": True})
 
     def _api_feed_facets(self, query: Dict):
@@ -540,6 +569,8 @@ class Handler(BaseHTTPRequestHandler):
             out["markdown_available"] = \
                 docs.has_convertible_source(row, self.ctx.docs_dir) or \
                 docs.has_repo_readme(row, self.ctx.docs_dir)
+        out["summary_citations"] = self.ctx.rag.passages(
+            out.get("summary_citations") or [], item_id=item_id)
         self._send_json(out)
 
     def _api_item_document(self, item_id: int):
@@ -613,6 +644,7 @@ class Handler(BaseHTTPRequestHandler):
                     source = "auto"
         if content is None:
             return self._send_json({"error": "no markdown"}, status=404)
+        self.ctx.rag_indexer.enqueue("item", item_id)
         self._send_bytes(content.encode("utf-8"), "text/markdown; charset=utf-8",
                          headers={"X-Markdown-Source": source})
 
@@ -666,6 +698,7 @@ class Handler(BaseHTTPRequestHandler):
                 "markdown_path=NULL, markdown_source=NULL WHERE id=?",
                 (doc_rel, now, item_id))
             self.ctx.conn.commit()
+        self.ctx.rag_indexer.enqueue("item", item_id)
         self._send_json({"ok": True, "doc_path": doc_rel})
 
     # -- summarize ----------------------------------------------------------
@@ -681,18 +714,27 @@ class Handler(BaseHTTPRequestHandler):
         item = self._item_dict(row)
         # Summarize once and cache; reuse the cached summary thereafter.
         cached = item["summary_readable"]
+        citations = []
         if not cached:
+            self.ctx.rag.index_item_id(item_id)
             result = ai.summarize_item(item, model)
+            citations = self.ctx.rag.passages(
+                result.get("citations") or [], item_id=item_id)
             with self.ctx.lock:
                 self.ctx.conn.execute(
-                    "UPDATE corpus_item SET summary_readable=?, summary_terms=? WHERE id=?",
-                    (json.dumps(result["summary"]), json.dumps(result["terms"]), item_id),
+                    "UPDATE corpus_item SET summary_readable=?, summary_terms=?, "
+                    "summary_citations=? WHERE id=?",
+                    (json.dumps(result["summary"]), json.dumps(result["terms"]),
+                     json.dumps(result.get("citations") or []), item_id),
                 )
                 self.ctx.conn.commit()
             summary, terms = result["summary"], result["terms"]
         else:
             summary, terms = cached, item["summary_terms"] or []
-        self._send_json({"summary": summary, "terms": terms, "model": model})
+            citations = self.ctx.rag.passages(
+                item.get("summary_citations") or [], item_id=item_id)
+        self._send_json({"summary": summary, "terms": terms, "model": model,
+                         "citations": citations})
 
     # -- ask ----------------------------------------------------------------
     def _api_ask(self):
@@ -727,12 +769,15 @@ class Handler(BaseHTTPRequestHandler):
         kb_notes = None
         graph = None
         if item:
+            self.ctx.rag.index_item_id(int(item["id"]))
             with self.ctx.lock:
                 bundle = retrieval.retrieve_context(self.ctx.conn, item, ask_span)
             kb_notes = bundle["notes"]
             graph = {"concepts": bundle["concepts"], "edges": bundle["edges"]}
         answer = ai.explain(ask_span, mode, item, model, history=history,
                             kb_notes=kb_notes, graph=graph)
+        citations = self.ctx.rag.passages(
+            answer.get("citations") or [], item_id=int(item["id"]) if item else None)
 
         # If tied to a saved entry, append the user turn + answer.
         if kb_entry_id:
@@ -748,7 +793,8 @@ class Handler(BaseHTTPRequestHandler):
                     "VALUES (?,?,?,?)", (int(kb_entry_id), "assistant", answer_text, now))
                 reindex_entry(self.ctx.conn, int(kb_entry_id))
                 self.ctx.conn.commit()
-        self._send_json({"answer": answer, "model": model})
+        self._send_json({"answer": answer, "model": model,
+                         "citations": citations})
 
     # -- explain (concept-based glossary) -----------------------------------
     def _concept_by_label(self, norm_label: str) -> Optional[sqlite3.Row]:
@@ -791,6 +837,7 @@ class Handler(BaseHTTPRequestHandler):
                     "SELECT * FROM corpus_item WHERE id=?", (int(item_id),)).fetchone()
             if row is not None:
                 item = self._item_dict(row)
+                self.ctx.rag.index_item_id(int(item["id"]))
 
         # Optimization: if the selection itself normalizes to a known concept
         # label, skip the extraction AI call entirely and return the cache.
@@ -841,6 +888,9 @@ class Handler(BaseHTTPRequestHandler):
                 "analogy": definition.get("analogy"),
                 "reused": False,
                 "kb_entry_id": None,
+                "citations": self.ctx.rag.passages(
+                    definition.get("citations") or [],
+                    item_id=int(item["id"]) if item else None),
             })
         self._send_json({"concepts": out, "question": None, "model": model})
 
@@ -916,8 +966,11 @@ class Handler(BaseHTTPRequestHandler):
             bundle = retrieval.retrieve_context(self.ctx.conn, item, message)
 
         graph = {"concepts": bundle["concepts"], "edges": bundle["edges"]}
+        self.ctx.rag.index_item_id(int(item_id))
         answer = ai.chat(item, history, message, kb_notes=bundle["notes"],
                          graph=graph, excerpt=bundle["excerpt"], model=model)
+        citations = self.ctx.rag.passages(
+            answer.get("citations") or [], item_id=int(item_id))
 
         now = utcnow()
         answer_text = self._answer_text(answer)
@@ -935,6 +988,7 @@ class Handler(BaseHTTPRequestHandler):
             "model": model,
             "kb_entry_id": entry_id,
             "grounded": bundle["grounded"],
+            "citations": citations,
         })
 
     # -- knowledge base -----------------------------------------------------
@@ -1034,6 +1088,12 @@ class Handler(BaseHTTPRequestHandler):
             self.ctx.conn.execute("DELETE FROM kb_fts WHERE entry_id=?", (entry_id,))
             self.ctx.conn.execute("DELETE FROM kb_entry WHERE id=?", (entry_id,))
             self.ctx.conn.commit()
+        rag_conn = self.ctx.new_conn()
+        try:
+            rag.delete_source(rag_conn, "kb", entry_id)
+        finally:
+            rag_conn.close()
+        self.ctx.rag_indexer.enqueue("kb", entry_id)
         self._send_json({"ok": True})
 
     def _api_kb_search(self, query: Dict):
@@ -1130,6 +1190,7 @@ class Handler(BaseHTTPRequestHandler):
             row = self.ctx.conn.execute(
                 "SELECT * FROM kb_entry WHERE id=?", (entry_id,)).fetchone()
             out = self._entry_dict(row, with_messages=True)
+        self.ctx.rag_indexer.enqueue("kb", entry_id)
         self._send_json({"ok": True, "entry": out})
 
     def _api_kb_save_concepts(self, data: dict):
@@ -1192,6 +1253,8 @@ class Handler(BaseHTTPRequestHandler):
                     "SELECT * FROM kb_entry WHERE id=?", (eid,)).fetchone()
                 saved.append(self._entry_dict(row, with_messages=True))
             self.ctx.conn.commit()
+        for entry in saved:
+            self.ctx.rag_indexer.enqueue("kb", int(entry["id"]))
         self._send_json({"ok": True, "entries": saved})
 
     def _api_kb_concepts(self):
@@ -1223,8 +1286,11 @@ class Handler(BaseHTTPRequestHandler):
         data = self._read_json()
         src = int(data.get("src"))
         dst = int(data.get("dst"))
+        source = data.get("source")
+        if source not in ("manual", "semantic"):
+            source = "manual"
         with self.ctx.lock:
-            edge_id = map_store.add_edge(self.ctx.conn, src, dst, source="manual")
+            edge_id = map_store.add_edge(self.ctx.conn, src, dst, source=source)
         if edge_id is None:
             return self._send_json({"error": "invalid edge"}, status=400)
         self._send_json({"ok": True, "id": edge_id})
@@ -1243,11 +1309,34 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json({"ok": True})
 
     def _api_map_ai_links(self):
-        data = self._read_json()
-        model = data.get("model") or self.ctx.default_model
         with self.ctx.lock:
-            result = map_store.ai_links(self.ctx.conn, model)
-        self._send_json(result)
+            graph = map_store.get_map(self.ctx.conn)
+        existing = {
+            tuple(sorted((int(edge["src"]), int(edge["dst"]))))
+            for edge in graph["edges"]
+        }
+        nodes = list(graph["nodes"])
+        for node in nodes:
+            if node.get("kb_entry_id"):
+                self.ctx.rag.index_kb_id(int(node["kb_entry_id"]))
+        suggestions = {}
+        for node in nodes:
+            related = self.ctx.rag.related(concept_id=int(node["id"]), limit=4)
+            for candidate in related:
+                pair = tuple(sorted((int(node["id"]),
+                                     int(candidate["concept_id"]))))
+                similarity = candidate.get("similarity")
+                if pair in existing or similarity is None or similarity < 0.55:
+                    continue
+                prior = suggestions.get(pair)
+                if prior is None or similarity > prior["similarity"]:
+                    suggestions[pair] = {
+                        "src": pair[0], "dst": pair[1],
+                        "similarity": similarity,
+                    }
+        result = sorted(suggestions.values(),
+                        key=lambda row: -row["similarity"])
+        self._send_json({"suggestions": result[:12], "added": 0})
 
     # -- refresh ------------------------------------------------------------
     def _api_refresh(self):
@@ -1441,12 +1530,23 @@ def main(argv=None) -> int:
                         help="default AI model id (else first listed)")
     parser.add_argument("--ingest-on-start", action="store_true",
                         help="ingest the latest report sidecars before serving")
+    parser.add_argument("--mcp-host", default=os.environ.get("GYM_MCP_HOST"),
+                        help="serve the private RAG MCP endpoint on this host")
+    parser.add_argument("--mcp-port", type=int,
+                        default=int(os.environ.get("GYM_MCP_PORT", "0")),
+                        help="private RAG MCP port (0 disables it)")
     args = parser.parse_args(argv)
 
-    ctx = AppContext(args.db, args.reports, args.docs_dir, default_model=args.model)
+    # Ingest first, then start one initial scan. This avoids doing duplicate
+    # full scans or racing a pre-ingest scan against report updates.
+    ctx = AppContext(args.db, args.reports, args.docs_dir,
+                     default_model=args.model, rag_background=False)
     if args.ingest_on_start:
         counts = ingest.ingest_latest(args.reports, ctx.conn)
         print("[server] ingested:", counts)
+    ctx.rag_indexer.start(initial_scan=True)
+    if args.mcp_host and args.mcp_port:
+        ctx.start_mcp(args.mcp_host, args.mcp_port)
 
     httpd = make_server(args.host, args.port, ctx)
     print("[server] Gymnasium University on http://{}:{}".format(args.host, args.port))

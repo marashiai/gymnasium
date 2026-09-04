@@ -43,6 +43,7 @@ def _install_fake_markitdown(monkeypatch, text="# Auto\n\nConverted body."):
 @pytest.fixture(autouse=True)
 def _fake_ai(monkeypatch):
     monkeypatch.setenv("OPENCODE_BIN", FAKE_OPENCODE)
+    monkeypatch.setenv("GYM_RAG_EMBEDDINGS", "off")
     yield
 
 
@@ -171,6 +172,7 @@ def test_bootstrap_adds_markdown_column_on_old_schema():
     db.bootstrap(c)
     cols = {r["name"] for r in c.execute("PRAGMA table_info(corpus_item)").fetchall()}
     assert "markdown_path" in cols
+    assert "summary_citations" in cols
     db.bootstrap(c)  # idempotent re-run on the migrated DB must not raise
 
 
@@ -481,6 +483,50 @@ def test_list_models_parsing():
     assert any(m["id"] == "openai/gpt-fake-mini" for m in openai["models"])
 
 
+def test_generate_uses_persistent_opencode_api_with_rag_agent(monkeypatch):
+    calls = []
+
+    def fake_remote(url, prompt, model, agent, timeout):
+        calls.append((url, prompt, model, agent, timeout))
+        return "done"
+
+    monkeypatch.setattr(ai, "_generate_remote", fake_remote)
+    monkeypatch.setenv("OPENCODE_URL", "http://opencode:4096")
+
+    assert ai.generate("question", "provider/model", agent="gymnasium") == "done"
+    assert calls == [("http://opencode:4096", "question", "provider/model",
+                      "gymnasium", ai.DEFAULT_TIMEOUT)]
+
+
+def test_remote_generation_waits_for_message_and_removes_session(monkeypatch):
+    calls = []
+
+    def fake_request(base_url, path, payload, timeout, method="POST"):
+        calls.append((base_url, path, payload, timeout, method))
+        if path == "/session":
+            return {"id": "session/one"}
+        if path.endswith("/message"):
+            return {"parts": [
+                {"type": "reasoning", "text": "hidden"},
+                {"type": "text", "text": "grounded answer"},
+            ]}
+        return None
+
+    monkeypatch.setattr(ai, "_remote_request", fake_request)
+
+    result = ai._generate_remote(
+        "http://opencode:4096", "question", "provider/model",
+        "gymnasium", 30)
+
+    assert result == "grounded answer"
+    assert calls[1][1] == "/session/session%2Fone/message"
+    assert calls[1][2]["model"] == {
+        "providerID": "provider", "modelID": "model"}
+    assert calls[1][2]["agent"] == "gymnasium"
+    assert calls[-1][1] == "/session/session%2Fone"
+    assert calls[-1][-1] == "DELETE"
+
+
 def test_summarize_item():
     out = ai.summarize_item({"kind": "paper", "title": "T", "abstract": "A"}, "openai/gpt-fake")
     assert isinstance(out["summary"], list) and 1 <= len(out["summary"]) <= 4
@@ -501,12 +547,6 @@ def test_extract_concepts_clear_and_vague():
     vague = ai.extract_concepts("this vague thing", {"title": "T"}, "openai/gpt-fake")
     assert vague["concepts"] == []
     assert vague["question"]
-
-
-def test_suggest_links():
-    others = [{"id": 3, "label": "Router"}, {"id": 7, "label": "Tokens"}]
-    out = ai.suggest_links({"id": 1, "label": "MoE"}, others, "openai/gpt-fake")
-    assert out == [3]
 
 
 # --------------------------------------------------------------------------
@@ -542,14 +582,6 @@ def test_map_nodes_edges_position(conn):
     assert round(node["x"], 1) == 12.5 and round(node["y"], 1) == 80.0
     map_store.delete_edge(conn, eid)
     assert map_store.get_map(conn)["edges"] == []
-
-
-def test_map_ai_links(conn):
-    _save_entry(conn, "Router", "router")
-    _save_entry(conn, "Experts", "experts")
-    res = map_store.ai_links(conn, "openai/gpt-fake")
-    assert res["added"] >= 1
-    assert any(e["source"] == "ai" for e in map_store.get_map(conn)["edges"])
 
 
 # --------------------------------------------------------------------------

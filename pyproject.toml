@@ -20,6 +20,9 @@ dependencies = [
     # Unpinned on purpose: the full converter needs Python >=3.10, while 3.9
     # resolves to a no-op placeholder release — the import guard covers both.
     "markitdown[pdf]",
+    "fastembed==0.8.0",
+    "sqlite-vec==0.1.9",
+    "mcp==2.1.1",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +32,7 @@ dev = ["pytest>=7.0"]
 labpapers = "labpapers.cli:main"
 labrepos = "labrepos.cli:main"
 gymnasium = "university.server:main"
+gymnasium-rag-mcp = "university.rag_mcp:main"
 
 [tool.setuptools.packages.find]
 include = ["labpapers*", "labrepos*", "university*"]

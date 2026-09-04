@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and start Gymnasium's app + optional Cloudflare tunnel containers.
+# Build and start Gymnasium's app, OpenCode, and optional tunnel services.
 
 set -euo pipefail
 

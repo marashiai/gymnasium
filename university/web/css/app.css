@@ -293,6 +293,16 @@ input, textarea, select { font-size: 16px; }
   padding: 10px 14px; border-radius: 10px; background: var(--sun-100);
   border: 1px solid var(--sun-500); font: 500 13px/1.4 var(--font-sans); color: var(--fg-2);
 }
+.map-suggestions { margin-top: 18px; }
+.map-suggestions h2 { font: 700 16px/1.2 var(--font-sans); color: var(--fg-1); margin-bottom: 8px; }
+.map-suggestion {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 11px 12px; border: 1px solid var(--border-hair); border-radius: 10px;
+  background: var(--bg-surface); margin-top: 7px; color: var(--fg-2);
+  font: 600 13px/1.35 var(--font-sans);
+}
+.map-suggestion span { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; }
+.map-suggestion small { width: 100%; color: var(--fg-muted); font: 500 11px/1.3 var(--font-sans); }
 
 /* Generic helpers used by JS-rendered screens */
 .seg-row { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -308,6 +318,13 @@ input, textarea, select { font-size: 16px; }
 }
 .spin { animation: gymSpin 1s linear infinite; }
 @keyframes gymSpin { to { transform: rotate(360deg); } }
+.chat-sources { align-self: flex-start; display: flex; flex-wrap: wrap; gap: 6px; max-width: 90%; }
+.chat-sources a, .chat-sources span {
+  padding: 5px 8px; border: 1px solid var(--border-hair); border-radius: 7px;
+  background: var(--bg-surface); color: var(--fg-3); font: 600 11px/1.3 var(--font-sans);
+  text-decoration: none;
+}
+.chat-sources a:hover { border-color: var(--sky-500); color: var(--sky-600); }
 
 /* Toast (shared) */
 .toast {
