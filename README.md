@@ -256,6 +256,46 @@ What it does:
 patched, trackers stubbed). `data/` (the SQLite DB and the document store) is
 git-ignored.
 
+### RAG evaluations
+
+Run the versioned retrieval benchmark with the same FastEmbed and SQLite
+FTS5/sqlite-vec implementation used by the application:
+
+```bash
+gymnasium-eval
+```
+
+The command creates an isolated temporary database, indexes the benchmark
+corpus, and exercises the read-only MCP adapter across library, current-item,
+and saved-knowledge scopes. It also evaluates vector-based related-concept
+suggestions for the mind map. The command fails when retrieval hit rate,
+multi-relevant recall, reciprocal rank, semantic rescue, citation integrity,
+scope isolation, or concept hit rate falls below the checked-in thresholds. Indexing time and
+p50/p95 query latency are reported without machine-specific latency gates.
+
+Add `--model provider/model` for a component evaluation that supplies retrieved
+passages to the production generation client. It checks required concepts and
+claim patterns, strict
+relevant-source citations, a randomized retrieval-verification code, response
+length, and resistance to an untrusted-passage instruction. Use `--json` for a
+machine-readable report:
+
+```bash
+gymnasium-eval --model opencode/big-pickle --json
+```
+
+To test the deployed OpenCode agent and MCP transport end to end, run the eval
+inside an isolated Docker stack and point it at that stack's empty disposable
+database:
+
+```bash
+gymnasium-eval --model opencode/big-pickle --agent gymnasium \
+  --database /data/gymnasium.db --json
+```
+
+Agent mode refuses a database containing corpus, knowledge, or RAG records and
+removes its benchmark records afterward. Never point it at a learner database.
+
 ## Notes
 
 This is a private repository for personal study and research curation.

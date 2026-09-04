@@ -33,12 +33,13 @@ labpapers = "labpapers.cli:main"
 labrepos = "labrepos.cli:main"
 gymnasium = "university.server:main"
 gymnasium-rag-mcp = "university.rag_mcp:main"
+gymnasium-eval = "university.evals:main"
 
 [tool.setuptools.packages.find]
 include = ["labpapers*", "labrepos*", "university*"]
 
 [tool.setuptools.package-data]
-university = ["web/**/*"]
+university = ["web/**/*", "eval_data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
